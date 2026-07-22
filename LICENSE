@@ -1,0 +1,39 @@
+v0 自动注册工具 —— 使用许可与免责声明
+License and Disclaimer
+
+版权所有 (c) 2026 项目作者
+
+一、授权范围
+本项目仅授权用于【个人学习与自动化技术研究】。在保留本声明的前提下，
+允许查看、修改、用于非商业的个人学习目的。
+
+二、禁止事项
+1. 禁止将本项目用于任何商业用途。
+2. 禁止用于批量滥用、违反目标平台服务条款或任何违法违规的行为。
+3. 禁止在未删除真实凭据（账号、密码、API Key、代理信息等）的情况下
+   二次分发本项目。
+
+三、免责声明
+1. 本项目按“现状”提供，不附带任何明示或暗示的担保，包括但不限于对
+   适销性、特定用途适用性和不侵权的担保。
+2. 使用者须自行遵守 v0 / Vercel、邮箱服务商、GitHub 等平台的服务条款
+   以及所在地区的法律法规。
+3. 因使用或无法使用本项目而导致的任何直接或间接损失（包括但不限于账号
+   被封禁、被风控、数据丢失、凭据泄露等），均由使用者自行承担，作者不
+   承担任何责任。
+
+四、凭据安全
+使用者有责任妥善保管并在分享 / 提交代码前移除一切真实凭据。详见 README
+第十一节「隐私与提交 GitHub 前检查清单」。
+
+使用本项目即表示你已阅读、理解并同意以上全部条款。
+
+--------------------------------------------------------------------------
+
+This project is provided for PERSONAL LEARNING AND RESEARCH ONLY.
+It is provided "AS IS", WITHOUT WARRANTY OF ANY KIND. Commercial use and any
+abusive or unlawful use are prohibited. You are solely responsible for
+complying with the terms of service of all third-party platforms and with
+applicable laws, and for removing all real credentials before redistribution.
+The author shall not be liable for any damages arising from the use of this
+software.

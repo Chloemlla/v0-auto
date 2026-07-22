@@ -1,0 +1,173 @@
+# 示例配置：复制本文件为 config.yaml 后按需修改
+#   copy config.example.yaml config.yaml
+# 切勿把含真实 browser_id / 代理密码的 config.yaml 提交到 Git
+#
+# v0 自动注册 — 单次生成 1 个 API Key（推荐配置）
+
+mail:
+  base_url: "https://mail.unsnow.org"
+  inbox_url: "https://mail.unsnow.org/app#inbox"
+  domain: "mail.unsnow.org"
+  # 当前站点会在登录后自行生成地址；此字段仅为兼容旧配置，不再作为地址来源
+  local_part: ""
+  code_timeout: 180
+  # v0 进入验证码页面后，邮箱页每 5 秒刷新一次
+  code_poll_interval: 5
+  # Vercel 官方邮箱 OTP 为 6 位；只提取带验证码上下文的 6 位数字
+  code_length: 6
+  address_verify_timeout: 45
+  # 已有活动邮箱时，Replace mailbox 整个流程的重试次数和间隔
+  address_create_attempts: 5
+  address_retry_interval: 2
+  # 邮箱窗口首次运行需要人工通过 GitHub 登录
+  auth_timeout: 300
+
+github:
+  # true 时尝试从本地 github_credentials.txt 自动填入账号密码
+  enabled: true
+  credentials_file: "github_credentials.txt"
+  login_timeout: 90
+
+v0:
+  home_url: "https://v0.app/"
+  signup_url: "https://v0.app/api/auth/login?next=%2F&action=signup"
+  keys_url_candidates:
+    - "https://v0.dev/chat/settings/keys"
+    - "https://v0.app/chat/settings/keys"
+    - "https://v0.app/settings/keys"
+  api_key_name_prefix: "auto"
+  code_page_timeout: 45
+  login_timeout: 90
+  # V0 偶尔会清空表单并回到注册页；每轮重新填写邮箱并继续点击，直到进入验证码页
+  continue_max_attempts: 2
+  continue_interval: 8
+  continue_wait_timeout: 18
+  # 第二次点击换按钮坐标，避免永远点中心
+  continue_second_click_offset: true
+  # 填完邮箱后停顿再点 Continue
+  pre_continue_dwell_s: 2.4
+  # 验证码粘贴后停顿（秒）；过短易被风控判假错误/要手机号
+  post_code_dwell_s: 2.8
+  # 验证码输入：paste | type | fill
+  code_input_mode: "paste"
+  # 半自动：true=只填邮箱，Continue 必须手点
+  semi_auto_continue: false
+  semi_auto_fill_email: true
+  manual_continue_timeout: 180
+  # 出口检测已改为动态对比（浏览器出口 IP 必须等于 7890 代理出口 IP），
+  # 不再固定节点。如仍想额外限定节点前缀，可填如 "198."
+  expected_egress_prefix: ""
+
+browser:
+  # 邮箱固定窗口仍走比特浏览器
+  mode: "bitbrowser"
+  # v0 注册窗口模式：
+  #   bitbrowser = 比特新建窗（默认，指纹交给比特）
+  #   edge_cdp   = 本机 Edge 真进程 + CDP（对齐手动无痕对照）
+  #   edge       = Playwright channel=msedge
+  v0_mode: "edge_private"
+  headless: false
+  slow_mo: 80
+  timeout_ms: 60000
+  user_data_dir: ""
+  # Edge/edge_cdp force InPrivate
+  edge_inprivate: true
+
+  bitbrowser:
+    api_url: "http://127.0.0.1:54345"
+    # 兼容旧配置：这里填写的 ID 也会作为固定邮箱窗口 ID 使用
+    browser_id: ""
+    # 固定邮箱/GitHub 窗口 ID。填写一次后会同步保存到 data/mail_browser_id.txt
+    mail_browser_id: ""
+    mail_browser_id_file: "data/mail_browser_id.txt"
+    mail_auto_select_existing: true
+    mail_profile_name_hint: "mail"
+    # v0 每轮都新建独立窗口；通常保持为空
+    v0_browser_id: ""
+    # v0 实际运行时由程序强制关闭自动复用，每轮新建独立窗口
+    auto_select_existing: false
+    profile_name_hint: "v0"
+    new_if_busy: true
+    # 复用已有窗口时先关窗口再重开，但保留登录 Cookie
+    close_existing_before_start: true
+    # 邮箱站点的 GitHub 登录态需要保留，因此默认不清缓存、不清 Cookie
+    clean_before_start: false
+    clean_after_finish: false
+    close_after: true
+    delete_after: false
+    preserve_window: false
+    # 检测到手机号验证时，删除当前窗口并让下一轮强制新建窗口
+    recreate_on_phone_verification: true
+    force_new_once: false
+    # 除了全局 Cookie/HTTP 缓存，还通过 CDP 清理这些站点的全部存储
+    clear_origins:
+      - "https://v0.app"
+      - "https://v0.dev"
+      - "https://vercel.com"
+      - "https://mail.unsnow.org"
+    # v0 窗口启动时追加 Chromium --incognito；固定邮箱窗口保持登录状态，不开启无痕参数
+    v0_incognito: true
+    proxy:
+      enabled: true
+      # http | https | socks5 | noproxy
+      type: "http"
+      host: "127.0.0.1"
+      port: 7890
+      username: ""
+      password: ""
+
+# 反机器人 / Kasada 加固（不伪造 x-kpsdk token，只隐藏自动化特征并等人机签发）
+anti_bot:
+  enabled: true
+  # light=只藏 webdriver（比特推荐）；full=全量噪声（edge/playwright）
+  stealth_mode: ""  # 空=按模式自动；edge_private 默认 off
+  human_type: true
+  human_click: true
+  # Continue 用系统真实鼠标点击（半自动证明有效）
+  os_click: false
+  # paste=复制粘贴风格（推荐）；type=逐字；fill=瞬填
+  email_input_mode: "paste"
+  # 验证码：paste=整串粘贴（对齐手动）；type=慢速逐字；fill=瞬填（易风控）
+  code_input_mode: "paste"
+  # 粘贴验证码后停顿秒数（手动常「贴完等一会」再通过）
+  post_code_dwell_s: 2.8
+  # Continue 提交策略轮换：click → enter → form
+  submit_strategies:
+    - click
+    - enter
+    - form
+  wait_kasada: true
+  observe_kpsdk_headers: true
+  warmup_mouse_moves: 0
+  # false=不做预热滚动，加快进入填邮箱
+  warmup_scroll: false
+  warmup_dwell_s: 0.4
+  kasada_wait_timeout: 8
+  blank_dwell_s: 1.2
+  locale: "zh-CN"
+  timezone_id: "Asia/Shanghai"
+  color_scheme: "light"
+  device_scale_factor: 1
+  viewport:
+    width: 1366
+    height: 900
+  cdp_port_base: 9333
+
+
+storage:
+  keys_dir: "data/keys"
+  accounts_dir: "data/accounts"
+  emails_dir: "data/emails"
+  logs_dir: "logs"
+
+run:
+  # 总共尝试次数；成功和失败都会继续到下一轮
+  count: 100
+  interval: 5
+  continue_on_failure: true
+  # 部分成功时也保留已保存的 API Key，并以成功数量作为最终结果
+  require_all_success: false
+  # 保存密钥后点击邮箱站点和 v0 的退出登录按钮
+  logout_after_finish: true
+  # 固定邮箱窗口默认保留 GitHub 登录态，不退出、不清 Cookie
+  mail_logout_after_finish: false
