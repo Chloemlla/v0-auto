@@ -997,14 +997,13 @@ class V0Registrar:
         )
 
     def _dismiss_post_login_overlays(self, rounds: int = 3) -> bool:
-        """点掉登录成功后 v0 弹出的欢迎 / 服务条款 / 引导弹层。
+        """关掉登录成功后的欢迎/服务条款/引导弹窗。
 
-        用户实测：验证码通过后 v0 会先弹一个官方引导页，必须点一下才能进入
-        控制台并创建 API Key。这里用宽松文案循环点击，并刻意避开
-        登出 / 删除 / 取消 等危险按钮，避免误伤登录态。返回是否至少点过一个按钮。
+        必须先关弹窗再点密钥页创建按钮，否则会点到遮罩或误关页面。
         """
         safe_patterns = (
             r"^Accept and continue$",
+            r"^Accept and Continue$",
             r"^Accept$",
             r"^I agree$",
             r"^Agree$",
@@ -1019,29 +1018,60 @@ class V0Registrar:
             r"^Maybe later$",
             r"^Not now$",
             r"^Next$",
-            r"^Done$",
             r"^OK$",
             r"^Okay$",
             r"^Authorize$",
             r"^Allow$",
+            r"^Try (it )?now$",
+            r"^Dismiss$",
+            r"^Close$",
             r"^接受并继续$",
             r"^接受$",
             r"^同意$",
             r"^继续$",
             r"^开始$",
-            r"^跳过$",
-            r"^完成$",
-            r"^好的$",
+            r"^下一步$",
             r"^知道了$",
-            r"^允许$",
+            r"^好的$",
+            r"^跳过$",
+            r"^关闭$",
         )
         danger = re.compile(
-            r"log ?out|sign ?out|delete|remove|cancel|discard|退出|删除|取消",
+            r"log\s?out|sign\s?out|delete|remove|cancel|discard|退出|删除|取消|destroy",
             re.I,
         )
         any_clicked = False
         for _ in range(max(1, rounds)):
             clicked = False
+            # 1) 优先点 dialog 内安全主按钮
+            try:
+                dialog_btns = self.page.locator(
+                    '[role="dialog"] button:visible, [aria-modal="true"] button:visible'
+                )
+                for i in range(min(dialog_btns.count(), 12)):
+                    btn = dialog_btns.nth(i)
+                    try:
+                        label = re.sub(r"\s+", " ", (btn.inner_text(timeout=300) or "")).strip()
+                    except Exception:
+                        continue
+                    if not label or danger.search(label):
+                        continue
+                    if re.search(
+                        r"accept|continue|agree|got it|skip|next|ok|start|allow|authorize|接受|继续|同意|知道|跳过|开始|好的",
+                        label,
+                        re.I,
+                    ):
+                        btn.click(timeout=2000)
+                        console.print(f"[green]关闭登录后弹窗: {label}[/green]")
+                        sleep(1.0)
+                        clicked = True
+                        any_clicked = True
+                        break
+            except Exception:
+                pass
+            if clicked:
+                continue
+            # 2) 全局 role=button 安全文案
             for pat in safe_patterns:
                 try:
                     btn = self.page.get_by_role("button", name=re.compile(pat, re.I))
@@ -1054,60 +1084,231 @@ class V0Registrar:
                     if danger.search(label):
                         continue
                     first.click(timeout=2000)
-                    console.print(f"[green]关闭登录后引导弹层: {label or pat}[/green]")
-                    sleep(1.2)
+                    console.print(f"[green]关闭登录后引导按钮: {label or pat}[/green]")
+                    sleep(1.0)
                     clicked = True
                     any_clicked = True
                     break
                 except Exception:
                     continue
             if not clicked:
+                # 3) Escape 关一层
+                try:
+                    self.page.keyboard.press("Escape")
+                    sleep(0.4)
+                except Exception:
+                    pass
                 break
         return any_clicked
 
-    def create_api_key(self, name: str | None = None) -> str:
-        """创建 API Key：登录后强制进 keys 页 → 创建 → 读取 v1:team_*:vcp_* → Done。"""
-        # 登录后可能停在 projects/欢迎页，先关遮罩再强制跳密钥地址
-        self._dismiss_post_login_overlays(rounds=3)
-        prefix = self.v0.get("api_key_name_prefix") or "auto"
-        name = name or f"{prefix}-{int(time.time())}"
-
-        candidates = list(self.v0.get("keys_url_candidates") or [])
-        candidates.extend(
+    def _project_keys_urls(self) -> list[str]:
+        """从当前已登录 URL 推导项目级密钥页（最稳）。"""
+        urls: list[str] = []
+        cur = self.page.url or ""
+        m = re.search(r"(https?://(?:v0\.app|v0\.dev)/[^/?#]+-projects)", cur, re.I)
+        if m:
+            base = m.group(1).rstrip("/")
+            urls.append(f"{base}/settings/keys")
+            urls.append(f"{base}/settings")
+        # 通用候选
+        urls.extend(
             [
                 "https://v0.app/chat/settings/keys",
                 "https://v0.dev/chat/settings/keys",
                 "https://v0.app/settings/keys",
                 "https://v0.dev/settings/keys",
-                "https://v0.app/chat/settings",
-                "https://v0.app/settings",
             ]
         )
-        # 当前在 projects 页时，直接 goto 更稳，不依赖侧栏
-        console.print(
-            f"[cyan]登录后准备打开密钥页，当前: {self.page.url}[/cyan]"
+        return list(dict.fromkeys(urls))
+
+    def _click_create_api_key_button(self) -> bool:
+        """在密钥页点击「创建/新建密钥」主按钮（支持中英、button/link/role）。"""
+        # 先滚动，避免按钮在 Sol 广告下方
+        try:
+            self.page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
+            sleep(0.4)
+            self.page.evaluate("() => window.scrollTo(0, 0)")
+            sleep(0.3)
+        except Exception:
+            pass
+
+        patterns = [
+            r"Create(\s+API)?\s*Key",
+            r"New(\s+API)?\s*Key",
+            r"Generate(\s+API)?\s*Key",
+            r"Create\s+API\s*密钥",
+            r"新建(\s*API)?\s*密钥",
+            r"创建(\s*API)?\s*密钥",
+            r"生成(\s*API)?\s*密钥",
+            r"^Create$",
+            r"^New$",
+            r"^Generate$",
+            r"^创建$",
+            r"^新建$",
+            r"^生成$",
+        ]
+        # role button / link
+        for role in ("button", "link"):
+            for pat in patterns:
+                try:
+                    loc = self.page.get_by_role(role, name=re.compile(pat, re.I))
+                    n = loc.count()
+                    for i in range(min(n, 6)):
+                        cand = loc.nth(i)
+                        if not cand.is_visible(timeout=600):
+                            continue
+                        label = re.sub(r"\s+", " ", (cand.inner_text(timeout=300) or "")).strip()
+                        # 避免点到导航里的纯 Settings 等
+                        if re.search(r"settings|logout|sign out|退出", label, re.I):
+                            continue
+                        cand.scroll_into_view_if_needed(timeout=1500)
+                        cand.click(timeout=3000)
+                        console.print(
+                            f"[green]已点击创建 API Key 按钮({role}): {label or pat}[/green]"
+                        )
+                        sleep(1.2)
+                        return True
+                except Exception:
+                    continue
+
+        # 文本兜底（不限 role）
+        text_pats = [
+            r"Create(\s+API)?\s*Key",
+            r"New(\s+API)?\s*Key",
+            r"创建.*密钥",
+            r"新建.*密钥",
+            r"生成.*密钥",
+        ]
+        for pat in text_pats:
+            try:
+                loc = self.page.get_by_text(re.compile(pat, re.I))
+                if loc.count() and loc.first.is_visible(timeout=800):
+                    loc.first.scroll_into_view_if_needed(timeout=1500)
+                    loc.first.click(timeout=3000)
+                    console.print(f"[green]已点击创建密钥文本: {pat}[/green]")
+                    sleep(1.2)
+                    return True
+            except Exception:
+                continue
+
+        # 扫描可见按钮文本
+        try:
+            btns = self.page.locator("button:visible, a:visible, [role='button']:visible")
+            for i in range(min(btns.count(), 80)):
+                el = btns.nth(i)
+                try:
+                    label = re.sub(r"\s+", " ", (el.inner_text(timeout=200) or "")).strip()
+                except Exception:
+                    continue
+                if not label or len(label) > 40:
+                    continue
+                if re.search(
+                    r"(create|new|generate).*(api)?\s*key|创建.*密钥|新建.*密钥|生成.*密钥",
+                    label,
+                    re.I,
+                ):
+                    el.scroll_into_view_if_needed(timeout=1500)
+                    el.click(timeout=3000)
+                    console.print(f"[green]已点击扫描到的创建按钮: {label}[/green]")
+                    sleep(1.2)
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _confirm_create_in_dialog(self) -> bool:
+        """在创建密钥对话框内点确认（只点 dialog 内，避免点到页面别处）。"""
+        patterns = (
+            r"^Create$",
+            r"^Create(?:\s+API)?\s*Key$",
+            r"^Generate$",
+            r"^Confirm$",
+            r"^Save$",
+            r"^创建$",
+            r"^确认$",
+            r"^生成$",
+            r"^保存$",
         )
+        # dialog 内优先
+        for sel in (
+            '[role="dialog"] button',
+            '[aria-modal="true"] button',
+            '[role="dialog"] [role="button"]',
+        ):
+            try:
+                locs = self.page.locator(sel)
+                for i in range(min(locs.count(), 20)):
+                    el = locs.nth(i)
+                    if not el.is_visible(timeout=300):
+                        continue
+                    label = re.sub(r"\s+", " ", (el.inner_text(timeout=200) or "")).strip()
+                    if not label:
+                        continue
+                    if re.search(
+                        r"^(create|generate|confirm|save|创建|确认|生成|保存)(\s+api)?(\s*key)?$",
+                        label,
+                        re.I,
+                    ):
+                        el.click(timeout=2000)
+                        console.print(f"[green]对话框内确认创建: {label}[/green]")
+                        sleep(1.5)
+                        return True
+            except Exception:
+                continue
+        for pat in patterns:
+            try:
+                btn = self.page.get_by_role("button", name=re.compile(pat, re.I))
+                if btn.count() and btn.first.is_visible(timeout=600):
+                    # 优先 dialog 内
+                    try:
+                        dlg = self.page.locator('[role="dialog"]').filter(has=btn.first)
+                        if dlg.count():
+                            btn.first.click(timeout=2000)
+                            console.print(f"[green]确认创建密钥: {pat}[/green]")
+                            sleep(1.5)
+                            return True
+                    except Exception:
+                        pass
+                    btn.first.click(timeout=2000)
+                    console.print(f"[green]确认创建密钥: {pat}[/green]")
+                    sleep(1.5)
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def create_api_key(self, name: str | None = None) -> str:
+        """创建 API Key：先关弹窗 → 进 keys 页 → 点创建 → 读 v1:team_*:vcp_* → Done。"""
+        # 1) 登录后弹窗必须先关掉，否则后续点击会落到遮罩/误关页面
+        self._dismiss_post_login_overlays(rounds=5)
+        prefix = self.v0.get("api_key_name_prefix") or "auto"
+        name = name or f"{prefix}-{int(time.time())}"
+
+        candidates = list(self.v0.get("keys_url_candidates") or [])
+        candidates = self._project_keys_urls() + candidates
+        console.print(f"[cyan]登录后准备打开密钥页，当前: {self.page.url}[/cyan]")
 
         def _keys_page_ready() -> bool:
             url = (self.page.url or "").lower()
-            if any(x in url for x in ("/settings/keys", "/chat/settings/keys", "settings/keys")):
+            if "settings/keys" in url or "/keys" in url:
                 return True
             try:
                 body = (self.page.inner_text("body") or "").lower()
             except Exception:
                 body = ""
-            markers = (
-                "api key",
-                "api keys",
-                "create key",
-                "create api",
-                "generate",
-                "save your key",
-                "secret key",
-                "new api key",
-                "密钥",
+            return any(
+                k in body
+                for k in (
+                    "api key",
+                    "api keys",
+                    "create key",
+                    "new api key",
+                    "secret key",
+                    "save your key",
+                    "api 密钥",
+                    "密钥",
+                )
             )
-            return any(k in body for k in markers)
 
         opened = False
         last_err = None
@@ -1115,34 +1316,33 @@ class V0Registrar:
             try:
                 console.print(f"[cyan]尝试打开 API Keys: {url}[/cyan]")
                 self.page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                sleep(2)
-                self._dismiss_post_login_overlays(rounds=2)
+                sleep(1.5)
+                # 进密钥页后可能再弹 Sol / 引导，继续关
+                self._dismiss_post_login_overlays(rounds=3)
                 self._accept_terms_if_present()
-                sleep(0.8)
-                # 被重定向回登录则继续试下一个
+                sleep(0.6)
                 cur = (self.page.url or "").lower()
                 if any(x in cur for x in ("/login", "/signup", "action=signup", "/api/auth/login")):
                     console.print(f"[yellow]密钥地址被重定向到登录: {self.page.url}[/yellow]")
                     continue
-                if _keys_page_ready() or self._is_logged_in():
-                    # 已登录即可继续；keys 文案有时延迟渲染
-                    if _keys_page_ready():
-                        opened = True
-                        console.print(f"[green]已进入密钥相关页: {self.page.url}[/green]")
-                        break
-                    # 在 settings 根页再点 API Keys
-                    self._click_if_visible(
-                        [
-                            ("link", r"API.?Keys?|密钥"),
-                            ("button", r"API.?Keys?|密钥"),
-                            ("text", r"API.?Keys?|密钥"),
-                        ]
-                    )
-                    sleep(1.2)
-                    if _keys_page_ready():
-                        opened = True
-                        console.print(f"[green]已从设置进入密钥页: {self.page.url}[/green]")
-                        break
+                if _keys_page_ready():
+                    opened = True
+                    console.print(f"[green]已进入密钥相关页: {self.page.url}[/green]")
+                    break
+                # settings 根页再点 API Keys 侧栏
+                self._click_if_visible(
+                    [
+                        ("link", r"API.?Keys?|API\s*密钥|密钥"),
+                        ("button", r"API.?Keys?|API\s*密钥|密钥"),
+                        ("text", r"API.?Keys?|API\s*密钥"),
+                    ]
+                )
+                sleep(1.0)
+                self._dismiss_post_login_overlays(rounds=2)
+                if _keys_page_ready():
+                    opened = True
+                    console.print(f"[green]已从设置进入密钥页: {self.page.url}[/green]")
+                    break
             except Exception as exc:
                 last_err = exc
                 console.print(f"[yellow]打开密钥页失败 {url}: {exc}[/yellow]")
@@ -1151,24 +1351,21 @@ class V0Registrar:
         if not opened:
             console.print("[yellow]直接 URL 未稳定进入密钥页，改走 UI 菜单[/yellow]")
             self._open_settings_via_ui()
+            self._dismiss_post_login_overlays(rounds=2)
             self._accept_terms_if_present()
             self._click_if_visible(
                 [
-                    ("link", r"API.?Keys?|密钥"),
-                    ("button", r"API.?Keys?|密钥"),
-                    ("text", r"API.?Keys?|密钥"),
+                    ("link", r"API.?Keys?|API\s*密钥|密钥"),
+                    ("button", r"API.?Keys?|API\s*密钥|密钥"),
+                    ("text", r"API.?Keys?|API\s*密钥"),
                 ]
             )
-            sleep(1.5)
+            sleep(1.2)
             opened = _keys_page_ready() or self._is_logged_in()
 
-        body = ""
-        try:
-            body = (self.page.inner_text("body") or "").lower()
-        except Exception:
-            body = ""
+        # 进页后再关一次弹窗（Sol 广告等）
+        self._dismiss_post_login_overlays(rounds=2)
 
-        # 若弹窗里已经露出 key，直接取
         existing = self._extract_api_key_from_page()
         if existing:
             console.print(
@@ -1183,37 +1380,13 @@ class V0Registrar:
                 + (f"；上次错误: {last_err}" if last_err else "")
             )
 
-        # 创建 / 生成按钮
-        created = False
-        for name_pat in (
-            r"Create(\s+API)?\s*Key",
-            r"New(\s+API)?\s*Key",
-            r"Generate(\s+API)?\s*Key",
-            r"^Generate$",
-            r"^Create$",
-            r"创建",
-            r"新建",
-            r"生成",
-        ):
-            try:
-                btn = self.page.get_by_role("button", name=re.compile(name_pat, re.I))
-                if btn.count() and btn.first.is_visible(timeout=1000):
-                    btn.first.click()
-                    created = True
-                    console.print(f"[green]已点击创建 API Key 按钮: {name_pat}[/green]")
-                    sleep(1.2)
-                    break
-            except Exception:
-                continue
+        # 2) 点创建密钥（先关遮罩再点，避免误关页面）
+        created = self._click_create_api_key_button()
         if not created:
-            try:
-                self.page.get_by_text(
-                    re.compile(r"Create.*Key|Generate.*Key|创建.*密钥|生成", re.I)
-                ).first.click(timeout=2000)
-                created = True
-                sleep(1)
-            except Exception:
-                pass
+            # 再关弹窗重试一次
+            self._dismiss_post_login_overlays(rounds=2)
+            created = self._click_create_api_key_button()
+
         if not created:
             api_key = self._extract_api_key_from_page()
             if api_key:
@@ -1222,12 +1395,26 @@ class V0Registrar:
                     f"[bold green]API Key 创建成功: {api_key[:12]}...{api_key[-6:]}[/bold green]"
                 )
                 return api_key
-            hint = re.sub(r"\s+", " ", self.page.inner_text("body") or "")[:300]
+            # dump visible button labels for debug
+            labels = []
+            try:
+                btns = self.page.locator("button:visible, a:visible, [role='button']:visible")
+                for i in range(min(btns.count(), 40)):
+                    try:
+                        lb = re.sub(r"\s+", " ", btns.nth(i).inner_text(timeout=150) or "").strip()
+                        if lb:
+                            labels.append(lb[:40])
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            hint = re.sub(r"\s+", " ", self.page.inner_text("body") or "")[:240]
             raise RuntimeError(
-                f"API Keys 页面没有找到创建密钥按钮，当前: {self.page.url}；页面摘要: {hint}"
+                f"API Keys 页面没有找到创建密钥按钮，当前: {self.page.url}；"
+                f"可见按钮: {labels[:15]}；页面摘要: {hint}"
             )
 
-        # 填写名称（可选）
+        # 3) 可选命名
         named = False
         for sel in (
             '[role="dialog"] input[name*="name" i]',
@@ -1255,37 +1442,15 @@ class V0Registrar:
         if not named:
             console.print("[yellow]创建对话框没有名称输入框，将使用站点默认名称[/yellow]")
 
-        # 确认创建
-        confirmed = False
-        for name_pat in (
-            r"^Create$",
-            r"^Create(?: API)?\s*Key$",
-            r"^Generate$",
-            r"^Generate(?: API)?\s*Key$",
-            r"^Confirm$",
-            r"^创建$",
-            r"^确认$",
-            r"^生成$",
-            r"^Save$",
-            r"^保存$",
-            r"^Continue$",
-            r"^Accept$",
-        ):
-            try:
-                btn = self.page.get_by_role("button", name=re.compile(name_pat, re.I))
-                if btn.count() and btn.first.is_visible(timeout=800):
-                    btn.first.click()
-                    sleep(1.5)
-                    confirmed = True
-                    console.print(f"[green]确认创建密钥: {name_pat}[/green]")
-                    break
-            except Exception:
-                continue
+        # 4) 对话框内确认创建（不再用页面级裸 Continue，避免关错）
+        confirmed = self._confirm_create_in_dialog()
         if not confirmed:
             console.print("[yellow]未找到二次确认按钮，直接尝试读取密钥[/yellow]")
 
+        # 5) 读取 key
         api_key = None
-        for round_i in range(8):
+        for round_i in range(10):
+            # 展示 key 的弹窗若又盖住，先别乱点 Continue；只取 key / Copy / Done
             api_key = self._extract_api_key_from_page()
             if api_key:
                 break
@@ -1295,7 +1460,7 @@ class V0Registrar:
                     ("button", r"Copy|复制"),
                 ]
             )
-            sleep(1.0 + round_i * 0.25)
+            sleep(0.8 + round_i * 0.2)
         if not api_key:
             raise RuntimeError(
                 f"未能从页面读取 API Key，当前: {self.page.url}；请手动复制或检查选择器"
