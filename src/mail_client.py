@@ -156,11 +156,147 @@ class UnsnowMail:
         except Exception:
             return False
 
+    def _try_pass_cf_challenge(self) -> bool:
+        """尝试点击 Cloudflare / Turnstile 人机验证（勾选框或 Verify 按钮）。
+
+        无法保证 100% 自动过（部分挑战需真实人机），但常见 checkbox 可点。
+        返回是否执行了点击动作。
+        """
+        clicked = False
+        # 1) 页面上的 Verify / 确认 按钮
+        for pat in (
+            r"^Verify you are human$",
+            r"^Verify$",
+            r"^I am human$",
+            r"^Continue$",
+            r"^确认$",
+            r"^验证$",
+            r"Verify you are human",
+            r"确认您是真人",
+            r"人机验证",
+        ):
+            try:
+                btn = self.page.get_by_role("button", name=re.compile(pat, re.I))
+                if btn.count() and btn.first.is_visible(timeout=400):
+                    btn.first.click(timeout=2000)
+                    console.print(f"[green]已点击人机验证按钮: {pat}[/green]")
+                    sleep(1.2)
+                    clicked = True
+                    break
+            except Exception:
+                continue
+            try:
+                loc = self.page.get_by_text(re.compile(pat, re.I))
+                if loc.count() and loc.first.is_visible(timeout=400):
+                    loc.first.click(timeout=2000)
+                    console.print(f"[green]已点击人机验证文本: {pat}[/green]")
+                    sleep(1.2)
+                    clicked = True
+                    break
+            except Exception:
+                continue
+
+        # 2) 主页面 checkbox
+        if not clicked:
+            for sel in (
+                'input[type="checkbox"]',
+                'label:has(input[type="checkbox"])',
+                ".cf-turnstile",
+                "#challenge-stage input",
+                '[id*="cf-" i] input[type="checkbox"]',
+            ):
+                try:
+                    loc = self.page.locator(sel).first
+                    if loc.count() and loc.is_visible(timeout=400):
+                        loc.click(timeout=2000)
+                        console.print(f"[green]已点击人机验证勾选: {sel}[/green]")
+                        sleep(1.2)
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+
+        # 3) Cloudflare / Turnstile iframe 内勾选
+        try:
+            frames = list(self.page.frames)
+        except Exception:
+            frames = []
+        for frame in frames:
+            try:
+                furl = (frame.url or "").lower()
+            except Exception:
+                furl = ""
+            if not any(
+                k in furl
+                for k in (
+                    "challenges.cloudflare.com",
+                    "turnstile",
+                    "cf-chl",
+                    "cloudflare",
+                )
+            ) and furl not in ("", "about:blank"):
+                # 仍尝试 frame 内 checkbox（有些无完整 url）
+                pass
+            try:
+                # checkbox
+                cb = frame.locator('input[type="checkbox"], label, body')
+                # 优先 checkbox
+                box = frame.locator('input[type="checkbox"]').first
+                if box.count() and box.is_visible(timeout=300):
+                    box.click(timeout=2000)
+                    console.print("[green]已点击 CF iframe 内 checkbox[/green]")
+                    sleep(1.5)
+                    clicked = True
+                    break
+                # 点 body 中心（部分 turnstile 可点区域）
+                body = frame.locator("body")
+                if body.count():
+                    box2 = body.bounding_box()
+                    if box2 and box2.get("width", 0) > 10:
+                        # 左侧勾选区
+                        frame.click(
+                            "body",
+                            position={"x": min(30, box2["width"] * 0.15), "y": box2["height"] * 0.5},
+                            timeout=2000,
+                        )
+                        console.print("[green]已点击 CF iframe 勾选区域[/green]")
+                        sleep(1.5)
+                        clicked = True
+                        break
+            except Exception:
+                continue
+
+        # 4) 直接找 turnstile iframe 元素点一下
+        if not clicked:
+            for sel in (
+                'iframe[src*="challenges.cloudflare.com"]',
+                'iframe[src*="turnstile"]',
+                'iframe[title*="Widget" i]',
+                'iframe[title*="cloudflare" i]',
+            ):
+                try:
+                    iframe = self.page.locator(sel).first
+                    if iframe.count() and iframe.is_visible(timeout=400):
+                        box = iframe.bounding_box()
+                        if box:
+                            # 点 iframe 左侧（勾选框常见位置）
+                            self.page.mouse.click(
+                                box["x"] + min(28, box["width"] * 0.12),
+                                box["y"] + box["height"] * 0.5,
+                            )
+                            console.print(f"[green]已鼠标点击 CF iframe 区域: {sel}[/green]")
+                            sleep(1.5)
+                            clicked = True
+                            break
+                except Exception:
+                    continue
+        return clicked
+
     def open_and_pass_cf(self, max_wait: int = 180) -> None:
-        """打开/复用邮箱页。全自动：已登录则绝不刷新，避免触发 CF。"""
+        """打开/附着邮箱页。已就绪则绝不重复导航/重载；CF 只等待不轮询刷新。"""
         console.print(f"[cyan]打开邮箱: {self.inbox_url}[/cyan]")
         self._collect_network()
-        # 先在同 context 里找已打开的收件箱标签
+        # 优先附着同 context 已打开的邮箱标签
         try:
             ctx = self.page.context
             for p in ctx.pages:
@@ -177,40 +313,53 @@ class UnsnowMail:
         already = False
         try:
             cur = (self.page.url or "").lower()
-            if cur.startswith(self.base.lower()) and self._mail_ui_ready():
+            body_preview = ""
+            try:
+                body_preview = (self.page.inner_text("body") or "")[:2500]
+            except Exception:
+                body_preview = ""
+            # 已登录收件箱：直接返回，禁止 reload / goto
+            if cur.startswith(self.base.lower()) and (
+                self._mail_ui_ready()
+                or self._looks_authenticated(body_preview)
+                or self._is_inbox_url(body_preview)
+            ):
                 already = True
-                console.print("[green]邮箱页已就绪，跳过重复导航（全自动不刷 CF）[/green]")
+                console.print(
+                    "[green]邮箱页已经就绪（已登录），不重复导航/全自动硬刷 CF[/green]"
+                )
             elif cur.startswith(self.base.lower()) and any(
                 k in (self.page.title() or "").lower() for k in ("inbox", "unsnow")
             ):
-                # 标题已是 Inbox，即使 body 暂时读不到也视为可用
                 already = True
-                console.print("[green]邮箱标签已在 Inbox，跳过导航[/green]")
+                console.print("[green]邮箱标签标题 Inbox，直接复用[/green]")
         except Exception:
             already = False
 
-        if not already:
-            # 仅当不在邮箱站时才导航；失败也不死磕狂刷
+        if already:
+            sleep(0.3)
+            return
+
+        # 仅当完全不在邮箱站时才 goto 一次；禁止对已在邮箱站的页面 reload（CF 会更卡）
+        try:
+            cur = (self.page.url or "").lower()
+        except Exception:
+            cur = ""
+        if not cur.startswith(self.base.lower()) and "mail.unsnow" not in cur:
             try:
-                cur = (self.page.url or "").lower()
-            except Exception:
-                cur = ""
-            if not cur.startswith(self.base.lower()):
                 self.page.goto(self.inbox_url, wait_until="domcontentloaded")
-            else:
-                # 已在域名内但 UI 未就绪：软刷新一次即可
-                try:
-                    self.page.reload(wait_until="domcontentloaded")
-                except Exception:
-                    try:
-                        self.page.goto(self.inbox_url, wait_until="domcontentloaded")
-                    except Exception:
-                        pass
+            except Exception:
+                pass
+        else:
+            console.print(
+                "[yellow]已在邮箱站但 UI 未就绪，仅等待（不 reload，避免触发/加重 CF）[/yellow]"
+            )
 
         deadline = time.time() + max_wait
         ready = False
         challenge_notified = False
         soft_ok_since = None
+        last_progress = time.time()
         while time.time() < deadline:
             if self._mail_ui_ready():
                 ready = True
@@ -222,9 +371,15 @@ class UnsnowMail:
             except Exception:
                 pass
             try:
-                content = (self.page.inner_text("body") or "")[:800].lower()
+                content = (self.page.inner_text("body") or "")[:1200].lower()
             except Exception:
                 pass
+            # 已登录信号出现 → 立刻当就绪
+            if self._looks_authenticated(content):
+                ready = True
+                console.print("[green]等待中检测到已登录信号，停止 CF 等待[/green]")
+                break
+
             hard_cf = (
                 "just a moment",
                 "checking your browser",
@@ -232,6 +387,8 @@ class UnsnowMail:
                 "security service to protect",
                 "attention required",
                 "cf-browser-verification",
+                "verify you are human",
+                "needs to review the security",
             )
             on_hard_cf = any(m in title or m in content for m in hard_cf) or (
                 "cloudflare" in title and "inbox" not in title and "unsnow" not in title
@@ -239,73 +396,122 @@ class UnsnowMail:
             if on_hard_cf:
                 if not challenge_notified:
                     console.print(
-                        "[yellow]Cloudflare 挑战中，自动等待通过（无需你操作）...[/yellow]"
+                        "[yellow]Cloudflare 人机验证中：尝试自动点击验证按钮/勾选框（不刷新）...[/yellow]"
                     )
                     challenge_notified = True
+                # 尝试点击人机验证，禁止 reload
+                try:
+                    self._try_pass_cf_challenge()
+                except Exception:
+                    pass
                 sleep(2)
                 continue
-            # 已在邮箱域名：累计软就绪，避免永远卡死要人点
-            if (self.page.url or "").lower().startswith(self.base.lower()):
+
+            if (self.page.url or "").lower().startswith(self.base.lower()) or "mail.unsnow" in (
+                self.page.url or ""
+            ).lower():
                 if soft_ok_since is None:
                     soft_ok_since = time.time()
-                # 标题像正常站，或已等超过 8 秒仍无硬 CF → 放行给后续登录检测
                 if "inbox" in title or "unsnow" in title:
                     ready = True
                     break
-                if time.time() - soft_ok_since >= 8:
+                # 已在邮箱域 12s 无硬 CF → 放行，避免死等
+                if time.time() - soft_ok_since >= 12:
                     console.print(
-                        "[yellow]邮箱页无硬 CF，软放行进入登录态检测[/yellow]"
+                        "[yellow]邮箱域无硬 CF 已等待足够，放行进入登录态检查[/yellow]"
                     )
                     ready = True
                     break
             sleep(1)
+
         if not ready:
-            # 最后兜底：只要 cookie/域名在就继续，别整轮报死
             try:
-                if (self.page.url or "").lower().startswith(self.base.lower()):
+                if (self.page.url or "").lower().startswith(self.base.lower()) or "mail.unsnow" in (
+                    self.page.url or ""
+                ).lower():
                     console.print(
-                        "[yellow]CF 等待超时但已在邮箱域名，继续尝试登录态[/yellow]"
+                        "[yellow]CF 等待超时，但已在邮箱站，继续尝试登录态[/yellow]"
                     )
                     ready = True
             except Exception:
                 pass
         if not ready:
-            raise TimeoutError("邮箱页 Cloudflare 验证在等待时间内未完成")
-        sleep(0.8)
+            raise TimeoutError(
+                "邮箱页 Cloudflare 验证在等待时间内未通过（未强制刷新以避免卡死）"
+            )
+        sleep(0.5)
+
 
     def wait_until_authenticated(self, timeout: int | None = None) -> None:
-        """等待邮箱站点完成 GitHub 登录，不清理登录态，也不伪造登录成功。"""
+        """等待邮箱站完成 GitHub 登录。已登录则直接返回，绝不重复点登录。"""
         timeout = timeout or int(self.cfg["mail"].get("auth_timeout", 300))
         deadline = time.time() + timeout
         prompted = False
         clicked_github = False
+
+        self._select_mail_page_if_available()
+        try:
+            body0 = self._read_mail_text()
+        except Exception:
+            body0 = ""
+        if self._looks_authenticated(body0) or self._is_inbox_url(body0):
+            console.print("[green]邮箱站已确认登录，跳过 GitHub 登录[/green]")
+            return
+        try:
+            cur = (self.page.url or "").lower()
+            if "mail.unsnow" in cur and self._looks_authenticated(body0):
+                console.print("[green]收件箱已打开且已登录，跳过 GitHub 登录[/green]")
+                return
+        except Exception:
+            pass
+
         while time.time() < deadline:
             self._select_mail_page_if_available()
-            body = self._read_mail_text()
+            try:
+                body = self._read_mail_text()
+            except Exception:
+                body = ""
             low = body.lower()
             if self._looks_authenticated(low) or self._is_inbox_url(low):
-                console.print("[green]邮箱站点已确认登录，跳过 GitHub 登录[/green]")
+                console.print("[green]邮箱站已确认登录，跳过 GitHub 登录[/green]")
                 return
 
+            still_need_login = any(
+                m in low
+                for m in (
+                    "sign in with github",
+                    "continue with github",
+                    "使用 github 登录",
+                    "通过 github 登录",
+                    "login with github",
+                )
+            )
             github_page = self._find_github_page()
-            if github_page:
+            if github_page and still_need_login:
                 self.github_login.login_if_needed(github_page)
 
-            if not clicked_github:
+            if still_need_login and not clicked_github:
                 clicked_github = self._click_visible(
                     [
-                        ("button", r"(?:Continue|Sign in|Log in).*GitHub|GitHub.*(?:登录|登陆|Sign in|Log in)"),
-                        ("link", r"(?:Continue|Sign in|Log in).*GitHub|GitHub.*(?:登录|登陆|Sign in|Log in)"),
-                        ("text", r"使用 GitHub 登录|通过 GitHub 登录"),
+                        (
+                            "button",
+                            r"(?:Continue|Sign in|Log in).*GitHub|GitHub.*(?:登录|登入|Sign in|Log in)",
+                        ),
+                        (
+                            "link",
+                            r"(?:Continue|Sign in|Log in).*GitHub|GitHub.*(?:登录|登入|Sign in|Log in)",
+                        ),
+                        ("text", r"使用 GitHub 登录|通过 GitHub 登录|Sign in with GitHub"),
                     ]
                 )
-            if not prompted:
+            if not prompted and still_need_login:
                 console.print(
-                    "[yellow]请在邮箱窗口完成 GitHub 登录；登录完成后脚本会自动选择临时域名并生成邮箱...[/yellow]"
+                    "[yellow]请在邮箱窗口完成 GitHub 登录；登录完成后脚本自动继续...[/yellow]"
                 )
                 prompted = True
             sleep(2)
-        raise TimeoutError(f"邮箱站点 GitHub 登录等待超时（{timeout}s）")
+        raise TimeoutError(f"邮箱站 GitHub 登录等待超时（{timeout}s）")
+
 
     def _select_mail_page_if_available(self) -> None:
         try:
@@ -328,32 +534,33 @@ class UnsnowMail:
 
     @staticmethod
     def _looks_authenticated(text: str) -> bool:
-        logged_markers = (
-            "logout",
-            "log out",
-            "sign out",
-            "退出登录",
-            "退出",
-        )
-        content_markers = (
-            "inbox",
-            "收件箱",
-            "mailbox",
-            "create mailbox",
-            "generate mailbox",
-        )
+        """已登录收件箱判定：有退出/Replace/当前地址即可，勿再点 GitHub 登录。"""
+        low = (text or "").lower()
         login_markers = (
             "sign in with github",
             "continue with github",
             "使用 github 登录",
-            "github 登录",
+            "通过 github 登录",
+            "login with github",
         )
-        if any(marker in text for marker in logged_markers):
-            # 页面可能在个人菜单中同时显示“退出”和 GitHub 文案，退出优先。
+        strong = (
+            "sign out",
+            "log out",
+            "logout",
+            "退出登录",
+            "replace mailbox",
+            "替换邮箱",
+            "current address",
+            "recall mailbox",
+            "available mailboxes",
+        )
+        if any(m in low for m in strong):
             return True
-        return any(marker in text for marker in content_markers) and not any(
-            marker in text for marker in login_markers
-        )
+        weak = ("inbox", "收件箱", "mailbox", "listening", "temporary inbox")
+        if any(m in low for m in weak) and not any(m in low for m in login_markers):
+            return True
+        return False
+
 
     def _is_inbox_url(self, text: str = "") -> bool:
         url = (self.page.url or "").lower()
@@ -577,16 +784,55 @@ class UnsnowMail:
         self, domain: str, previous_addresses: set[str], timeout: float
     ) -> str | None:
         deadline = time.time() + max(0.5, timeout)
+        synced = False
         while time.time() < deadline:
             candidates = self._extract_generated_addresses(domain)
-            new_candidates = [candidate for candidate in candidates if candidate not in previous_addresses]
+            new_candidates = [
+                c for c in candidates if c not in previous_addresses
+            ]
             if new_candidates:
                 return new_candidates[-1]
-            # 没有旧邮箱时可以直接采用页面返回的第一个地址；有旧邮箱时必须等地址变化。
+            # 无旧地址时，直接采用页面第一个
             if not previous_addresses and candidates:
                 return candidates[-1]
+            # 中途点一次 Sync，帮助地址刷新（仅一次）
+            if not synced and time.time() + 2 < deadline:
+                try:
+                    # 换号弹窗也可能弹出 CF
+                    self._try_pass_cf_challenge()
+                except Exception:
+                    pass
+                try:
+                    self._click_visible(
+                        [
+                            ("button", r"^Sync$|^刷新$|^同步$"),
+                            ("text", r"^Sync$"),
+                        ]
+                    )
+                    synced = True
+                except Exception:
+                    pass
             sleep(0.5)
+        # 兜底：若页面仍显示 CURRENT ADDRESS 且在目标域，返回当前地址
+        # （Replace 有时 UI 未变 local，但地址可用；调用方会据此继续）
+        try:
+            body = self._read_mail_text()
+        except Exception:
+            body = ""
+        m = re.search(
+            rf"current\s+address\s*([a-z0-9][a-z0-9._-]{{2,63}}@{re.escape(domain)})",
+            body,
+            re.I,
+        )
+        if m:
+            email = m.group(1).lower()
+            if email not in previous_addresses or not previous_addresses:
+                console.print(
+                    f"[yellow]未检测到相对旧地址的变化，回退使用 CURRENT ADDRESS: {email}[/yellow]"
+                )
+                return email
         return None
+
 
     def _close_mailbox_dialog(self) -> None:
         """失败重试前关闭可能残留的邮箱弹窗，避免下一轮点击被遮挡。"""
