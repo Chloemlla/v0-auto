@@ -34,6 +34,65 @@ class V0Registrar:
         self.cfg = cfg
         self.v0 = cfg.get("v0") or {}
 
+    def _try_click_cloudflare(self) -> bool:
+        """v0/Vercel 页面上的 Cloudflare 人机：尝试点勾选/Verify。"""
+        clicked = False
+        for pat in (
+            r"Verify you are human",
+            r"^Verify$",
+            r"确认您是真人",
+            r"人机验证",
+        ):
+            try:
+                btn = self.page.get_by_role("button", name=re.compile(pat, re.I))
+                if btn.count() and btn.first.is_visible(timeout=400):
+                    btn.first.click(timeout=2000)
+                    console.print(f"[green]v0 页已点人机验证: {pat}[/green]")
+                    sleep(1.2)
+                    return True
+            except Exception:
+                continue
+        for sel in (
+            'iframe[src*="challenges.cloudflare.com"]',
+            'iframe[src*="turnstile"]',
+            'iframe[title*="Widget" i]',
+        ):
+            try:
+                iframe = self.page.locator(sel).first
+                if iframe.count() and iframe.is_visible(timeout=400):
+                    box = iframe.bounding_box()
+                    if box:
+                        self.page.mouse.click(
+                            box["x"] + min(28, box["width"] * 0.12),
+                            box["y"] + box["height"] * 0.5,
+                        )
+                        console.print("[green]v0 页已点击 CF iframe 勾选区[/green]")
+                        sleep(1.5)
+                        return True
+            except Exception:
+                continue
+        try:
+            for frame in self.page.frames:
+                u = (frame.url or "").lower()
+                if "cloudflare" in u or "turnstile" in u or "challenges" in u:
+                    try:
+                        box = frame.locator('input[type="checkbox"]').first
+                        if box.count():
+                            box.click(timeout=2000)
+                            console.print("[green]v0 页 CF frame checkbox 已点[/green]")
+                            sleep(1.5)
+                            return True
+                    except Exception:
+                        try:
+                            frame.click("body", position={"x": 25, "y": 30}, timeout=2000)
+                            sleep(1.5)
+                            return True
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        return clicked
+
     def register_with_email(
         self,
         email: str,
@@ -45,6 +104,8 @@ class V0Registrar:
         console.print(f"[cyan]打开 v0 注册: {signup}[/cyan]")
         self.page.goto(signup, wait_until="domcontentloaded")
         sleep(2)
+        self._try_click_cloudflare()
+
 
         # 可能已经在 vercel signup
         self._ensure_signup_page()
@@ -587,6 +648,7 @@ class V0Registrar:
     def _wait_code_page(self, timeout: int = 30) -> None:
         deadline = time.time() + timeout
         while time.time() < deadline:
+            self._try_click_cloudflare()
             self._raise_for_auth_error()
             if self._is_code_page():
                 console.print("[green]已进入验证码页面[/green]")
