@@ -281,7 +281,6 @@ git ls-files | findstr /i "credentials config.yaml all_keys"
 - 终端输出：[rich](https://github.com/Textualize/rich)
 - 配置与环境：PyYAML、python-dotenv
 - 依赖清单见 `requirements.txt`
-https://vsllm.com
 ---
 
 ## 十四、免责声明
